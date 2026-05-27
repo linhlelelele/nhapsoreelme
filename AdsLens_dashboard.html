@@ -8888,43 +8888,76 @@ async function pullCostByDate() {
   let rowsProcessed = 0;
   let rowsSkippedFilter = 0;
   
+  // Debug log structure
+  if (state.filtered.length > 0) {
+    console.log('[GS] state.filtered sample:', state.filtered[0]);
+    console.log('[GS] Keys available:', Object.keys(state.filtered[0]));
+  }
+  
+  let dateErrors = 0;
+  let firstDateError = null;
+  
   for (const r of state.filtered) {
-    const name = (r['Campaign name'] || r['Campaign'] || r.campaignName || '').toLowerCase();
+    // Field name thực trong state.filtered là 'campaign' (string) và 'campaignName' (alias)
+    const name = (r.campaign || r.campaignName || r['Campaign name'] || r['Campaign'] || '').toLowerCase();
     
-    // Filter by keyword (skip if name không chứa keyword)
+    // Filter by keyword
     if (campKeyword && !name.includes(campKeyword)) {
       rowsSkippedFilter++;
       continue;
     }
     
-    const date = r.Day || r.day || r.Date || r.date;
-    const spend = parseFloat(r.Spend || r.spend || 0);
-    if (!date || spend === 0) continue;
+    // Field thực: r.spend (number), r.utcDate (Date object), r.utcMs (timestamp)
+    const spend = parseFloat(r.spend || r.Spend || 0);
+    if (spend === 0) continue;
     
-    // Normalize date về YYYY-MM-DD
-    let dateKey = date;
-    if (date instanceof Date) {
-      dateKey = date.toISOString().slice(0, 10);
-    } else if (typeof date === 'string') {
-      // Có thể là "YYYY-MM-DD" hoặc "DD/MM/YYYY"
-      if (/^\d{4}-\d{2}-\d{2}/.test(date)) {
-        dateKey = date.slice(0, 10);
-      } else {
-        const m = date.match(/(\d+)\/(\d+)\/(\d+)/);
-        if (m) {
-          dateKey = `${m[3]}-${String(parseInt(m[2])).padStart(2,'0')}-${String(parseInt(m[1])).padStart(2,'0')}`;
+    // Date: dùng utcMs với displayTz để ra date theo timezone đã chọn
+    let dateKey = null;
+    try {
+      if (r.utcMs !== undefined && r.utcMs !== null) {
+        // Convert utcMs → date string theo displayTz
+        const displayTz = state.lastDisplayTz || 'Asia/Ho_Chi_Minh';
+        // Simple conversion: utcMs + offset (handle both 'Asia/Ho_Chi_Minh' và number offset)
+        let offsetHours = 7;  // default VN
+        if (typeof displayTz === 'string') {
+          if (displayTz.includes('Los_Angeles') || displayTz === 'PST' || displayTz === 'PDT') offsetHours = -7;
+          else if (displayTz.includes('Ho_Chi_Minh') || displayTz === 'VN' || displayTz === '+07:00') offsetHours = 7;
+        } else if (typeof displayTz === 'number') {
+          offsetHours = displayTz;
         }
+        const localMs = r.utcMs + offsetHours * 3600 * 1000;
+        const d = new Date(localMs);
+        dateKey = d.getUTCFullYear() + '-' + 
+                  String(d.getUTCMonth() + 1).padStart(2, '0') + '-' + 
+                  String(d.getUTCDate()).padStart(2, '0');
+      } else if (r.utcDate) {
+        const d = new Date(r.utcDate);
+        dateKey = d.getUTCFullYear() + '-' + 
+                  String(d.getUTCMonth() + 1).padStart(2, '0') + '-' + 
+                  String(d.getUTCDate()).padStart(2, '0');
       }
+    } catch (err) {
+      dateErrors++;
+      if (!firstDateError) firstDateError = err.message;
     }
+    
+    if (!dateKey) continue;
     
     if (!dateMin || dateKey < dateMin) dateMin = dateKey;
     if (!dateMax || dateKey > dateMax) dateMax = dateKey;
     
-    const isFunnel = !!r.isFunnel;
+    // Determine W2A vs Funnel based on campaign name (vì r.isFunnel có thể undefined)
+    // Funnel = name contains 'funnel' or 'webfunnel'
+    const isFunnel = name.includes('funnel') || name.includes('webfunnel');
     const target = isFunnel ? funnelByDate : w2aByDate;
     target[dateKey] = (target[dateKey] || 0) + spend;
     rowsProcessed++;
   }
+  
+  if (dateErrors > 0) {
+    console.warn('[GS] Date errors:', dateErrors, 'first error:', firstDateError);
+  }
+  console.log('[GS] Processed:', rowsProcessed, 'rows · W2A dates:', Object.keys(w2aByDate).length, '· Funnel dates:', Object.keys(funnelByDate).length);
   
   // Fill full date range với 0 cho missing dates
   if (dateMin && dateMax) {
